@@ -68,3 +68,8 @@ markers = [
     "run_slow: mark tests as slow, skip unless --run_slow flag is passed",
     "serial",
 ]
+
+[dependency-groups]
+dev = [
+    "click>=8.2.1",
+]
