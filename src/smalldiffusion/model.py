@@ -9,22 +9,22 @@ from itertools import pairwise
 ## Basic functions used by all models
 
 class ModelMixin:
-    def rand_input(self, batchsize):
+    def rand_input(self, batchsize) -> torch.Tensor:
         assert hasattr(self, 'input_dims'), 'Model must have "input_dims" attribute!'
-        return torch.randn((batchsize,) + self.input_dims)
+        return torch.randn((batchsize,) + self.input_dims) # type: ignore
 
     # Currently predicts eps, override following methods to predict, for example, x0
     def get_loss(self, x0, sigma, eps, cond=None, loss=nn.MSELoss):
-        return loss()(eps, self(x0 + sigma * eps, sigma, cond=cond))
+        return loss()(eps, self(x0 + sigma * eps, sigma, cond=cond)) # type: ignore
 
     def predict_eps(self, x, sigma, cond=None):
-        return self(x, sigma, cond=cond)
+        return self(x, sigma, cond=cond) # type: ignore
 
     def predict_eps_cfg(self, x, sigma, cond, cfg_scale):
         if cond is None or cfg_scale == 0:
             return self.predict_eps(x, sigma, cond=cond)
         assert sigma.shape == tuple(), 'CFG sampling only supports singleton sigma!'
-        uncond = torch.full_like(cond, self.cond_embed.null_cond) # (B,)
+        uncond = torch.full_like(cond, self.cond_embed.null_cond) # (B,) # type: ignore
         eps_cond, eps_uncond = self.predict_eps(                  # (B,), (B,)
             torch.cat([x, x]), sigma, torch.cat([cond, uncond])   # (2B,)
         ).chunk(2)
@@ -65,13 +65,13 @@ def alpha(sigma):
     return 1/(1+sigma**2)
 
 # Scale model input so that its norm stays constant for all sigma
-def Scaled(cls: ModelMixin):
+def Scaled[T: type[ModelMixin]](cls: T) -> T:
     def forward(self, x, sigma, cond=None):
-        return cls.forward(self, x * alpha(sigma).sqrt(), sigma, cond=cond)
-    return type(cls.__name__ + 'Scaled', (cls,), dict(forward=forward))
+        return cls.forward(self, x * alpha(sigma).sqrt(), sigma, cond=cond) # type: ignore
+    return type(cls.__name__ + 'Scaled', (cls,), dict(forward=forward)) # type: ignore
 
 # Train model to predict x0 instead of eps
-def PredX0(cls: ModelMixin):
+def PredX0(cls: type[ModelMixin]):
     def get_loss(self, x0, sigma, eps, cond=None, loss=nn.MSELoss):
         return loss()(x0, self(x0 + sigma * eps, sigma, cond=cond))
     def predict_eps(self, x, sigma, cond=None):
@@ -81,7 +81,7 @@ def PredX0(cls: ModelMixin):
                 dict(get_loss=get_loss, predict_eps=predict_eps))
 
 # Train model to predict v (https://arxiv.org/pdf/2202.00512.pdf) instead of eps
-def PredV(cls: ModelMixin):
+def PredV(cls: type[ModelMixin]):
     def get_loss(self, x0, sigma, eps, cond=None, loss=nn.MSELoss):
         xt = x0 + sigma * eps
         v = alpha(sigma).sqrt() * eps - (1-alpha(sigma)).sqrt() * x0
@@ -95,7 +95,7 @@ def PredV(cls: ModelMixin):
 ## Common functions for other models
 
 class CondSequential(nn.Sequential):
-    def forward(self, x, cond):
+    def forward(self, x, cond): # type: ignore
         for module in self._modules.values():
             x = module(x, cond)
         return x
@@ -135,7 +135,7 @@ class CondEmbedderLabel(nn.Module):
 
 ## Simple MLP for toy examples
 
-class TimeInputMLP(nn.Module, ModelMixin):
+class TimeInputMLP(ModelMixin, nn.Module):
     sigma_dim = 2
     def __init__(self, dim=2, output_dim=None, hidden_dims=(16,128,256,128,16)):
         super().__init__()
@@ -161,7 +161,7 @@ class ConditionalMLP(TimeInputMLP):
         self.input_dims = (dim,)
         self.cond_embed = CondEmbedderLabel(cond_dim, num_classes, dropout_prob)
 
-    def forward(self,
+    def forward(self, # type: ignore
                 x,     # shape: b x dim
                 sigma, # shape: b x 1 or scalar
                 cond,  # shape: b
@@ -177,10 +177,10 @@ def sq_norm(M, k):
     # M: b x n --(norm)--> b --(repeat)--> b x k
     return (torch.norm(M, dim=1)**2).unsqueeze(1).repeat(1,k)
 
-class IdealDenoiser(nn.Module, ModelMixin):
+class IdealDenoiser(ModelMixin, nn.Module):
     def __init__(self, dataset: torch.utils.data.Dataset):
         super().__init__()
-        self.data = torch.stack([dataset[i] for i in range(len(dataset))])
+        self.data = torch.stack([dataset[i] for i in range(len(dataset))]) # type: ignore
         self.input_dims = self.data.shape[1:]
 
     def forward(self, x, sigma, cond=None):

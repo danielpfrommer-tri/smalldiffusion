@@ -1,8 +1,15 @@
+import jax.random
 import torch
 import csv
 import numpy as np
-from torch.utils.data import Dataset
+
+from torch.utils.data import Dataset, Sampler
 from torchvision import transforms as tf
+import torchvision.transforms.functional as tf_F
+
+from typing import Iterator, Sized, Optional
+
+from flax.nnx import RngStream
 
 ## Dataset utility functions
 
@@ -16,14 +23,91 @@ class MappedDataset(Dataset):
     def __getitem__(self, i):
         return self.fn(self.dataset[i])
 
-img_train_transform = tf.Compose([
-    tf.RandomHorizontalFlip(),
-    tf.ToTensor(),
-    tf.Lambda(lambda t: (t * 2) - 1)
-])
+class RandomHorizontalFlip(torch.nn.Module):
+    def __init__(self, rng: RngStream, p=0.5):
+        super().__init__()
+        self.rng = rng
+        self.p = p
+
+    def forward(self, img):
+        if self.rng.bernoulli(self.p):
+            return tf_F.hflip(img)
+        return img
+
+    def __repr__(self) -> str:
+        return f"{self.__class__.__name__}(p={self.p})"
+
+def img_test_transform():
+    return tf.Compose([
+        tf.ToTensor(),
+        tf.Lambda(lambda t: (t * 2) - 1)
+    ])
+
+def img_train_transform(rng: RngStream):
+    return tf.Compose([
+        RandomHorizontalFlip(rng),
+        tf.ToTensor(),
+        tf.Lambda(lambda t: (t * 2) - 1)
+    ])
 
 img_normalize = lambda x: ((x + 1)/2).clamp(0, 1)
 
+class RandomSampler(Sampler[int]):
+    r"""Samples elements randomly. If without replacement, then sample from a shuffled dataset.
+    If with replacement, then user can specify :attr:`num_samples` to draw.
+
+    Args:
+        data_source (Dataset): dataset to sample from
+        replacement (bool): samples are drawn on-demand with replacement if ``True``, default=``False``
+        num_samples (int): number of samples to draw, default=`len(dataset)`.
+        generator (Generator): Generator used in sampling.
+    """
+    data_source: Sized
+    replacement: bool
+
+    def __init__(
+        self,
+        data_source: Sized,
+        rng_stream: RngStream,
+        replacement: bool = False,
+        num_samples: Optional[int] = None,
+    ) -> None:
+        self.data_source = data_source
+        self.replacement = replacement
+        self._num_samples = num_samples
+        self.rng_stream = rng_stream
+
+        if not isinstance(self.replacement, bool):
+            raise TypeError(
+                f"replacement should be a boolean value, but got replacement={self.replacement}"
+            )
+
+        if not isinstance(self.num_samples, int) or self.num_samples <= 0:
+            raise ValueError(
+                f"num_samples should be a positive integer value, but got num_samples={self.num_samples}"
+            )
+
+    @property
+    def num_samples(self) -> int:
+        # dataset size might change at runtime
+        if self._num_samples is None:
+            return len(self.data_source)
+        return self._num_samples
+
+    def __iter__(self) -> Iterator[int]:
+        n = len(self.data_source)
+
+        if self.replacement:
+            for _ in range(self.num_samples // 32):
+                yield from (int(i) for i in self.rng_stream.randint((32,), 0, n))
+        else:
+            for _ in range(self.num_samples // n):
+                yield from (int(i) for i in jax.random.permutation(self.rng_stream(), n))
+            if self.num_samples % n != 0:
+                yield from (int(i) for i in jax.random.choice(self.rng_stream(), n, (self.num_samples % n,), replace=False))
+
+    def __len__(self) -> int:
+        return self.num_samples
 
 ## Toy datasets
 

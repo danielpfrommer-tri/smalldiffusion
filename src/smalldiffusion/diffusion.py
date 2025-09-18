@@ -8,20 +8,22 @@ from torch import nn
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 from types import SimpleNamespace
-from typing import Optional, Union, Tuple
+from typing import Generator, Optional, Union, Tuple
+
+from .model import ModelMixin
 
 class Schedule:
     '''Diffusion noise schedules parameterized by sigma'''
-    def __init__(self, sigmas: torch.FloatTensor):
+    def __init__(self, sigmas: torch.Tensor):
         self.sigmas = sigmas
 
-    def __getitem__(self, i) -> torch.FloatTensor:
+    def __getitem__(self, i) -> torch.Tensor:
         return self.sigmas[i]
 
     def __len__(self) -> int:
         return len(self.sigmas)
 
-    def sample_sigmas(self, steps: int) -> torch.FloatTensor:
+    def sample_sigmas(self, steps: int) -> torch.Tensor:
         '''Called during sampling to get a decreasing sigma schedule with a
         specified number of sampling steps:
           - Spacing is "trailing" as in Table 2 of https://arxiv.org/abs/2305.08891
@@ -32,13 +34,13 @@ class Schedule:
                        .round().astype(np.int64) - 1)
         return self[indices + [0]]
 
-    def sample_batch(self, x0: torch.FloatTensor) -> torch.FloatTensor:
+    def sample_batch(self, x0: torch.Tensor) -> torch.Tensor:
         '''Called during training to get a batch of randomly sampled sigma values
         '''
         batchsize = x0.shape[0]
         return self[torch.randint(len(self), (batchsize,))].to(x0)
 
-def sigmas_from_betas(betas: torch.FloatTensor):
+def sigmas_from_betas(betas: torch.Tensor):
     return (1/torch.cumprod(1.0 - betas, dim=0) - 1).sqrt()
 
 # Simple log-linear schedule works for training many diffusion models
@@ -75,14 +77,14 @@ class ScheduleCosine(Schedule):
 # Returns
 #   eps  : i.i.d. normal with same shape as x0
 #   sigma: uniformly sampled from schedule, with shape Bx1x..x1 for broadcasting
-def generate_train_sample(x0: Union[torch.FloatTensor, Tuple[torch.FloatTensor, torch.FloatTensor]],
+def generate_train_sample(x0: Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]],
                           schedule: Schedule, conditional: bool=False):
     cond = x0[1] if conditional else None
-    x0   = x0[0] if conditional else x0
-    sigma = schedule.sample_batch(x0)
-    while len(sigma.shape) < len(x0.shape):
+    init: torch.Tensor = x0[0] if conditional else x0 # type: ignore
+    sigma = schedule.sample_batch(init)
+    while len(sigma.shape) < len(init.shape):
         sigma = sigma.unsqueeze(-1)
-    eps = torch.randn_like(x0)
+    eps = torch.randn_like(init)
     return x0, sigma, eps, cond
 
 # Model objects
@@ -93,18 +95,18 @@ def generate_train_sample(x0: Union[torch.FloatTensor, Tuple[torch.FloatTensor, 
 # Have a `rand_input` method for generating random xt during sampling
 
 def training_loop(loader      : DataLoader,
-                  model       : nn.Module,
+                  model       : ModelMixin,
                   schedule    : Schedule,
                   accelerator : Optional[Accelerator] = None,
                   epochs      : int = 10000,
                   lr          : float = 1e-3,
                   conditional : bool = False):
     accelerator = accelerator or Accelerator()
-    optimizer = torch.optim.AdamW(model.parameters(), lr=lr)
+    optimizer = torch.optim.AdamW(model.parameters(), lr=lr) # type: ignore
     model, optimizer, loader = accelerator.prepare(model, optimizer, loader)
     for _ in (pbar := tqdm(range(epochs))):
         for x0 in loader:
-            model.train()
+            model.train() # type: ignore
             optimizer.zero_grad()
             x0, sigma, eps, cond = generate_train_sample(x0, schedule, conditional)
             loss = model.get_loss(x0, sigma, eps, cond=cond)
@@ -117,26 +119,26 @@ def training_loop(loader      : DataLoader,
 #   DDIM       : gam=1, mu=0
 #   Accelerated: gam=2, mu=0
 @torch.no_grad()
-def samples(model      : nn.Module,
-            sigmas     : torch.FloatTensor, # Iterable with N+1 values for N sampling steps
+def samples(model      : ModelMixin,
+            sigmas     : torch.Tensor, # Iterable with N+1 values for N sampling steps
             gam        : float = 1.,        # Suggested to use gam >= 1
             mu         : float = 0.,        # Requires mu in [0, 1)
-            cfg_scale  : int = 0.,          # 0 means no classifier-free guidance
+            cfg_scale  : float = 0.,          # 0 means no classifier-free guidance
             batchsize  : int = 1,
-            xt         : Optional[torch.FloatTensor] = None,
+            xt         : Optional[torch.Tensor] = None,
             cond       : Optional[torch.Tensor] = None,
-            accelerator: Optional[Accelerator] = None):
-    model.eval()
+            accelerator: Optional[Accelerator] = None) -> Generator[torch.Tensor, None, None]:
+    model.eval() # type: ignore
     accelerator = accelerator or Accelerator()
     xt = model.rand_input(batchsize).to(accelerator.device) * sigmas[0] if xt is None else xt
     if cond is not None:
         assert cond.shape[0] == xt.shape[0], 'cond must have same shape as x!'
         cond = cond.to(xt.device)
     eps = None
-    for i, (sig, sig_prev) in enumerate(pairwise(sigmas)):
+    for _, (sig, sig_prev) in enumerate(pairwise(sigmas)):
         eps_prev, eps = eps, model.predict_eps_cfg(xt, sig.to(xt), cond, cfg_scale)
-        eps_av = eps * gam + eps_prev * (1-gam)  if i > 0 else eps
+        eps_av = eps * gam + eps_prev * (1-gam) if eps_prev is not None else eps
         sig_p = (sig_prev/sig**mu)**(1/(1-mu)) # sig_prev == sig**mu sig_p**(1-mu)
         eta = (sig_prev**2 - sig_p**2).sqrt()
-        xt = xt - (sig - sig_p) * eps_av + eta * model.rand_input(xt.shape[0]).to(xt)
-        yield xt
+        xt = xt - (sig - sig_p) * eps_av + eta * model.rand_input(xt.shape[0]).to(xt) # type: ignore
+        yield xt # type: ignore

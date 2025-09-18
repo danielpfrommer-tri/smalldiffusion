@@ -35,6 +35,9 @@ def main(model_path, out_dir, sample_batch_size, num_samples, schedule_type):
         sample_schedule = ScheduleLogLinear(sigma_min=0.01, sigma_max=35, N=1000)
     elif schedule_type == "sigmoid":
         sample_schedule = ScheduleSigmoid(N=1000)
+    else:
+        raise ValueError(f"Unknown schedule type {schedule_type}")
+
     for i in tqdm.tqdm(range(num_batches)):
         *_, x0 = samples(model, sample_schedule.sample_sigmas(10), gam=2.1,
                           batchsize=sample_batch_size, accelerator=a)

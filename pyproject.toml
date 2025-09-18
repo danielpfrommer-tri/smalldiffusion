@@ -37,6 +37,8 @@ dependencies = [
   "torch",
   "tqdm",
   "einops",
+  "jax>=0.6.2",
+  "flax>=0.10.7",
 ]
 
 [project.urls]
@@ -71,5 +73,8 @@ markers = [
 
 [dependency-groups]
 dev = [
+    "black>=25.1.0",
     "click>=8.2.1",
+    "pytorch-fid>=0.3.0",
+    "wandb>=0.21.4",
 ]

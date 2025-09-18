@@ -1,5 +1,6 @@
 datasets
-checkpoint*
+wandb
+checkpoints
 #python specific
 *.pyc
 __pycache__

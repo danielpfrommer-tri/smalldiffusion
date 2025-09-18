@@ -46,7 +46,7 @@ class ResnetBlock(nn.Module):
         self.layer2 = nn.Sequential(
             Normalize(out_ch),
             nn.SiLU(),
-            torch.nn.Dropout(dropout),
+            # torch.nn.Dropout(dropout),
             torch.nn.Conv2d(out_ch, out_ch, kernel_size=3, stride=1, padding=1),
         )
         if self.in_ch != self.out_ch:
@@ -81,7 +81,7 @@ class AttnBlock(nn.Module):
         h_ = rearrange(h_, 'b (h w) c -> b c h w', h=H, w=W)
         return x + self.proj_out(h_)
 
-class Unet(nn.Module, ModelMixin):
+class Unet(ModelMixin, nn.Module):
     def __init__(self, in_dim, in_ch, out_ch,
                  ch               = 128,
                  ch_mult          = (1,2,2,2),
@@ -114,6 +114,7 @@ class Unet(nn.Module, ModelMixin):
         in_ch_dim = [ch * m for m in (1,)+ch_mult]
         self.conv_in = torch.nn.Conv2d(in_ch, self.ch, kernel_size=3, stride=1, padding=1)
         self.downs = nn.ModuleList()
+        block_in, block_out = 0, 0
         for i, (block_in, block_out) in enumerate(pairwise(in_ch_dim)):
             down = nn.Module()
             down.blocks = nn.ModuleList()
@@ -144,7 +145,7 @@ class Unet(nn.Module, ModelMixin):
             for i_block in range(self.num_res_blocks+1):
                 if i_block == self.num_res_blocks:
                     skip_in = next_skip_in
-                block = [make_block(block_in+skip_in, block_out)]
+                block: list = [make_block(block_in+skip_in, block_out)]
                 if curr_res in attn_resolutions:
                     block.append(AttnBlock(block_out))
                 up.blocks.append(CondSequential(*block))
@@ -174,21 +175,21 @@ class Unet(nn.Module, ModelMixin):
         # downsampling
         hs = [self.conv_in(x)]
         for down in self.downs:
-            for block in down.blocks:
+            for block in down.blocks: # type: ignore
                 h = block(hs[-1], emb)
                 hs.append(h)
             if hasattr(down, 'downsample'):
-                hs.append(down.downsample(hs[-1]))
+                hs.append(down.downsample(hs[-1])) # type: ignore
 
         # middle
         h = self.mid(hs[-1], emb)
 
         # upsampling
         for up in self.ups:
-            for block in up.blocks:
+            for block in up.blocks: # type: ignore
                 h = block(torch.cat([h, hs.pop()], dim=1), emb)
             if hasattr(up, 'upsample'):
-                h = up.upsample(h)
+                h = up.upsample(h) # type: ignore
 
         # out
         return self.out_layer(h)
