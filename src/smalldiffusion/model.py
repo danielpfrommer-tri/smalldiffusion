@@ -1,12 +1,66 @@
 import math
+import typing as tp
+import numpy as np
 import torch
 import torch.nn.functional as F
 from torch import nn
 from einops import rearrange, repeat
 from itertools import pairwise
 
+# For flax-compatible initialization
+try:
+    import jax
+    from flax.nnx import Rngs
+    from flax.nnx import initializers
+except ImportError:
+    type Rngs = tp.Any
+    jax, initializers = None, None
 
 ## Basic functions used by all models
+
+@torch.no_grad()
+def _linear_init(layer: nn.Linear, rngs: Rngs | None) -> nn.Linear:
+    if rngs is not None:
+        assert initializers is not None and jax is not None
+        scale = 1/ math.sqrt(layer.in_features)
+        # kernel = initializers.variance_scaling(1.0, "fan_in", "uniform")(rngs.params(), layer.weight.shape[::-1]).T
+        kernel = jax.random.uniform(rngs.params(), layer.weight.shape[::-1], minval=-scale, maxval=scale).T
+        layer.weight.data.copy_(torch.from_numpy(np.array(kernel)))
+
+        if layer.bias is not None:
+            bias = jax.random.uniform(rngs.params(), layer.bias.shape, minval=-scale, maxval=scale)
+            layer.bias.data.copy_(torch.from_numpy(np.array(bias)))
+    return layer
+
+@torch.no_grad()
+def _conv_init(layer: nn.Conv2d, rngs: Rngs | None) -> nn.Conv2d:
+    if rngs is not None:
+        assert initializers is not None and jax is not None
+        scale = 1 / math.sqrt(layer.in_channels * layer.kernel_size[0] * layer.kernel_size[1])
+
+        jax_shape = tuple(layer.weight.shape[i] for i in (2, 3, 1, 0))
+        # kernel = initializers.variance_scaling(1.0, "fan_in", "uniform")(rngs.params(), jax_shape)
+        kernel = jax.random.uniform(rngs.params(), jax_shape, minval=-scale, maxval=scale)
+        kernel = kernel.transpose(3, 2, 0, 1) # to PyTorch shape
+
+        layer.weight.data.copy_(torch.from_numpy(np.array(kernel)))
+        if layer.bias is not None:
+            bias = jax.random.uniform(rngs.params(), layer.bias.shape, minval=-scale, maxval=scale)
+            layer.bias.data.copy_(torch.from_numpy(np.array(bias)))
+    return layer
+
+def _dropout_init(layer: nn.Dropout, rngs: Rngs | None) -> nn.Dropout:
+    # burn one key to mimic the flax behavior
+    if rngs is not None:
+        rngs.dropout()
+    return layer
+
+def _gn_init(layer: nn.GroupNorm, rngs: Rngs | None) -> nn.GroupNorm:
+    # burn two keys to mimic the flax behavior
+    if rngs is not None:
+        rngs.params()
+        rngs.params()
+    return layer
 
 class ModelMixin:
     def rand_input(self, batchsize) -> torch.Tensor:
@@ -42,14 +96,14 @@ def get_sigma_embeds(batches, sigma, scaling_factor=0.5, log_scale=True):
 
 # A simple embedding that works just as well as usual sinusoidal embedding
 class SigmaEmbedderSinCos(nn.Module):
-    def __init__(self, hidden_size, scaling_factor=0.5, log_scale=True):
+    def __init__(self, hidden_size, scaling_factor=0.5, log_scale=True, rngs: Rngs | None = None):
         super().__init__()
         self.scaling_factor = scaling_factor
         self.log_scale = log_scale
         self.mlp = nn.Sequential(
-            nn.Linear(2, hidden_size, bias=True),
+            _linear_init(nn.Linear(2, hidden_size, bias=True), rngs),
             nn.SiLU(),
-            nn.Linear(hidden_size, hidden_size, bias=True),
+            _linear_init(nn.Linear(hidden_size, hidden_size, bias=True), rngs),
         )
 
     def forward(self, batches, sigma):
@@ -101,13 +155,13 @@ class CondSequential(nn.Sequential):
         return x
 
 class Attention(nn.Module):
-    def __init__(self, head_dim, num_heads=8, qkv_bias=False):
+    def __init__(self, head_dim, num_heads=8, qkv_bias=False, rngs: Rngs | None = None):
         super().__init__()
         self.num_heads = num_heads
         self.head_dim = head_dim
         dim = head_dim * num_heads
-        self.qkv = nn.Linear(dim, dim * 3, bias=qkv_bias)
-        self.proj = nn.Linear(dim, dim)
+        self.qkv = _linear_init(nn.Linear(dim, dim * 3, bias=qkv_bias), rngs)
+        self.proj = _linear_init(nn.Linear(dim, dim), rngs)
 
     def forward(self, x):
         # (B, N, D) -> (B, N, D)

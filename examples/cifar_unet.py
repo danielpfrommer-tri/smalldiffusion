@@ -19,10 +19,10 @@ from smalldiffusion import (
     Unet, Scaled, ScheduleLogLinear, ScheduleSigmoid, samples, training_loop,
     MappedDataset, img_train_transform, img_normalize
 )
-from smalldiffusion.data import RandomSampler, img_test_transform
+from smalldiffusion.data import JaxRandomSampler, img_test_transform
 
 
-def main(train_batch_size=256, epochs=1000, sample_batch_size=64):
+def main(train_batch_size=256, epochs=1000, sample_batch_size=64, checkpoint=False):
     wandb.init()
     test_dataset = MappedDataset(
         CIFAR10('datasets', train=True, download=True,
@@ -37,15 +37,15 @@ def main(train_batch_size=256, epochs=1000, sample_batch_size=64):
     train_schedule = ScheduleSigmoid(N=1000)
     sample_schedule = ScheduleLogLinear(sigma_min=0.01, sigma_max=35, N=1000)
 
-    model = Scaled(Unet)(32, 3, 3, ch=128, ch_mult=(1, 2, 2, 2), attn_resolutions=(16,))
+    rngs = Rngs(43)
+    model = Scaled(Unet)(32, 3, 3, ch=128, ch_mult=(1, 2, 2, 2), attn_resolutions=(16,), rngs=rngs)
     Path("checkpoints").mkdir(parents=True, exist_ok=True)
     torch.save(model.state_dict(), 'checkpoints/checkpoint-initial.pth')
 
-    rngs = Rngs(42)
     dataset = MappedDataset(CIFAR10('datasets', train=True, download=True,
                                     transform=img_train_transform(rngs.flip)),
                             lambda x: x[0])
-    loader = DataLoader(dataset, batch_size=train_batch_size, sampler=RandomSampler(dataset, rngs.data))
+    loader = DataLoader(dataset, batch_size=train_batch_size, sampler=JaxRandomSampler(dataset, rngs.data))
 
     # Train
     ema = EMA(model.parameters(), decay=0.9999)
@@ -56,7 +56,7 @@ def main(train_batch_size=256, epochs=1000, sample_batch_size=64):
         ns.pbar.set_description(f'Loss={ns.loss.item():.5}')
         wandb.log({'loss': ns.loss.item(), 'lr': ns.lr}, step=i)
         ema.update()
-        if i % 1000 == 0:
+        if i % 1000 == 0 and checkpoint:
             with ema.average_parameters():
                 torch.save(model.state_dict(), f'checkpoint-{i + 1:04}.pth')
                 fid = eval_fid(TEST_DUMP, a, model, sample_schedule,

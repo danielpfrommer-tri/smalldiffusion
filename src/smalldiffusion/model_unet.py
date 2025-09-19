@@ -8,50 +8,51 @@ from itertools import pairwise
 from torch import nn
 from .model import (
     alpha, Attention, ModelMixin, CondSequential, SigmaEmbedderSinCos,
+    _linear_init, _conv_init, _gn_init, _dropout_init, Rngs
 )
 
-def Normalize(ch):
-    return torch.nn.GroupNorm(num_groups=32, num_channels=ch, eps=1e-6, affine=True)
+def Normalize(ch, rngs: Rngs | None = None):
+    return _gn_init(torch.nn.GroupNorm(num_groups=32, num_channels=ch, eps=1e-6, affine=True), rngs)
 
-def Upsample(ch):
+def Upsample(ch, rngs: Rngs | None = None):
     return nn.Sequential(
         nn.Upsample(scale_factor=2.0, mode='nearest'),
-        torch.nn.Conv2d(ch, ch, kernel_size=3, stride=1, padding=1),
+        _conv_init(torch.nn.Conv2d(ch, ch, kernel_size=3, stride=1, padding=1), rngs),
     )
 
-def Downsample(ch):
+def Downsample(ch, rngs: Rngs | None = None):
     return nn.Sequential(
         nn.ConstantPad2d((0, 1, 0, 1), 0),
-        torch.nn.Conv2d(ch, ch, kernel_size=3, stride=2, padding=0),
+        _conv_init(torch.nn.Conv2d(ch, ch, kernel_size=3, stride=2, padding=0), rngs),
     )
 
 class ResnetBlock(nn.Module):
     def __init__(self, *, in_ch, out_ch=None, conv_shortcut=False,
-                 dropout, temb_channels=512):
+                 dropout, temb_channels=512, rngs: Rngs | None = None):
         super().__init__()
         self.in_ch = in_ch
         out_ch = in_ch if out_ch is None else out_ch
         self.out_ch = out_ch
         self.use_conv_shortcut = conv_shortcut
 
-        self.layer1 = nn.Sequential(
-            Normalize(in_ch),
-            nn.SiLU(),
-            torch.nn.Conv2d(in_ch, out_ch, kernel_size=3, stride=1, padding=1),
-        )
         self.temb_proj = nn.Sequential(
             nn.SiLU(),
-            torch.nn.Linear(temb_channels, out_ch),
+            _linear_init(torch.nn.Linear(temb_channels, out_ch), rngs),
+        )
+        self.layer1 = nn.Sequential(
+            Normalize(in_ch, rngs=rngs),
+            nn.SiLU(),
+            _conv_init(torch.nn.Conv2d(in_ch, out_ch, kernel_size=3, stride=1, padding=1), rngs),
         )
         self.layer2 = nn.Sequential(
-            Normalize(out_ch),
+            Normalize(out_ch, rngs=rngs),
             nn.SiLU(),
-            # torch.nn.Dropout(dropout),
-            torch.nn.Conv2d(out_ch, out_ch, kernel_size=3, stride=1, padding=1),
+            _dropout_init(torch.nn.Dropout(dropout), rngs),
+            _conv_init(torch.nn.Conv2d(out_ch, out_ch, kernel_size=3, stride=1, padding=1), rngs),
         )
         if self.in_ch != self.out_ch:
             kernel_stride_padding = (3,1,1) if self.use_conv_shortcut else (1,1,0)
-            self.shortcut = torch.nn.Conv2d(in_ch, out_ch, *kernel_stride_padding)
+            self.shortcut = _conv_init(torch.nn.Conv2d(in_ch, out_ch, *kernel_stride_padding), rngs)
 
     def forward(self, x, temb):
         h = x
@@ -63,14 +64,12 @@ class ResnetBlock(nn.Module):
         return x + h
 
 class AttnBlock(nn.Module):
-    def __init__(self, ch, num_heads=1):
+    def __init__(self, ch, num_heads=1, rngs: Rngs | None = None):
         super().__init__()
         # Normalize input along the channel dimension
-        self.norm = Normalize(ch)
+        self.norm = Normalize(ch, rngs=rngs)
         # Attention over D: (B, N, D) -> (B, N, D)
-        self.attn = Attention(head_dim=ch // num_heads, num_heads=num_heads)
-        # Apply 1x1 convolution for projection
-        self.proj_out = nn.Conv2d(ch, ch, kernel_size=1, stride=1, padding=0)
+        self.attn = Attention(head_dim=ch // num_heads, num_heads=num_heads, rngs=rngs)
 
     def forward(self, x, temb):
         # temb is currently not used, but included for CondSequential to work
@@ -79,7 +78,7 @@ class AttnBlock(nn.Module):
         h_ = rearrange(h_, 'b c h w -> b (h w) c')
         h_ = self.attn(h_)
         h_ = rearrange(h_, 'b (h w) c -> b c h w', h=H, w=W)
-        return x + self.proj_out(h_)
+        return x
 
 class Unet(ModelMixin, nn.Module):
     def __init__(self, in_dim, in_ch, out_ch,
@@ -92,6 +91,7 @@ class Unet(ModelMixin, nn.Module):
                  resamp_with_conv = True,
                  sig_embed        = None,
                  cond_embed       = None,
+                 rngs: Rngs | None = None,
                  ):
         super().__init__()
 
@@ -105,14 +105,14 @@ class Unet(ModelMixin, nn.Module):
         # Embeddings
         self.sig_embed = sig_embed or SigmaEmbedderSinCos(self.temb_ch)
         make_block = lambda in_ch, out_ch: ResnetBlock(
-            in_ch=in_ch, out_ch=out_ch, temb_channels=self.temb_ch, dropout=dropout
+            in_ch=in_ch, out_ch=out_ch, temb_channels=self.temb_ch, dropout=dropout, rngs=rngs
         )
         self.cond_embed = cond_embed
 
         # Downsampling
         curr_res = in_dim
         in_ch_dim = [ch * m for m in (1,)+ch_mult]
-        self.conv_in = torch.nn.Conv2d(in_ch, self.ch, kernel_size=3, stride=1, padding=1)
+        self.conv_in = _conv_init(torch.nn.Conv2d(in_ch, self.ch, kernel_size=3, stride=1, padding=1), rngs)
         self.downs = nn.ModuleList()
         block_in, block_out = 0, 0
         for i, (block_in, block_out) in enumerate(pairwise(in_ch_dim)):
@@ -121,18 +121,18 @@ class Unet(ModelMixin, nn.Module):
             for _ in range(self.num_res_blocks):
                 block = [make_block(block_in,block_out)]
                 if curr_res in attn_resolutions:
-                    block.append(AttnBlock(block_out))
+                    block.append(AttnBlock(block_out, rngs=rngs))
                 down.blocks.append(CondSequential(*block))
                 block_in = block_out
             if i < self.num_resolutions - 1: # Not last iter
-                down.downsample = Downsample(block_in)
+                down.downsample = Downsample(block_in, rngs=rngs)
                 curr_res = curr_res // 2
             self.downs.append(down)
 
         # Middle
         self.mid = CondSequential(
             make_block(block_in, block_in),
-            AttnBlock(block_in),
+            AttnBlock(block_in, rngs=rngs),
             make_block(block_in, block_in)
         )
 
@@ -147,19 +147,19 @@ class Unet(ModelMixin, nn.Module):
                     skip_in = next_skip_in
                 block: list = [make_block(block_in+skip_in, block_out)]
                 if curr_res in attn_resolutions:
-                    block.append(AttnBlock(block_out))
+                    block.append(AttnBlock(block_out, rngs=rngs))
                 up.blocks.append(CondSequential(*block))
                 block_in = block_out
             if i_level < self.num_resolutions - 1: # Not last iter
-                up.upsample = Upsample(block_in)
+                up.upsample = Upsample(block_in, rngs=rngs)
                 curr_res = curr_res * 2
             self.ups.append(up)
 
         # Out
         self.out_layer = nn.Sequential(
-            Normalize(block_in),
+            Normalize(block_in, rngs=rngs),
             nn.SiLU(),
-            torch.nn.Conv2d(block_in, out_ch, kernel_size=3, stride=1, padding=1),
+            _conv_init(torch.nn.Conv2d(block_in, out_ch, kernel_size=3, stride=1, padding=1), rngs),
         )
 
     def forward(self, x, sigma, cond=None):

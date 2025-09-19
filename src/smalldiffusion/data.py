@@ -1,5 +1,5 @@
-import jax.random
 import torch
+import typing as tp
 import csv
 import numpy as np
 
@@ -9,7 +9,12 @@ import torchvision.transforms.functional as tf_F
 
 from typing import Iterator, Sized, Optional
 
-from flax.nnx import RngStream
+try:
+    import jax.random
+    from flax.nnx import RngStream
+except ImportError:
+    type RngStream = tp.Any
+    jax = None
 
 ## Dataset utility functions
 
@@ -52,7 +57,7 @@ def img_train_transform(rng: RngStream):
 
 img_normalize = lambda x: ((x + 1)/2).clamp(0, 1)
 
-class RandomSampler(Sampler[int]):
+class JaxRandomSampler(Sampler[int]):
     r"""Samples elements randomly. If without replacement, then sample from a shuffled dataset.
     If with replacement, then user can specify :attr:`num_samples` to draw.
 
@@ -101,6 +106,7 @@ class RandomSampler(Sampler[int]):
             for _ in range(self.num_samples // 32):
                 yield from (int(i) for i in self.rng_stream.randint((32,), 0, n))
         else:
+            assert jax is not None, "JAX is required for RandomSampler without replacement"
             for _ in range(self.num_samples // n):
                 yield from (int(i) for i in jax.random.permutation(self.rng_stream(), n))
             if self.num_samples % n != 0:

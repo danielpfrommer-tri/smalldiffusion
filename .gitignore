@@ -1,6 +1,7 @@
 datasets
 wandb
 checkpoints
+*.png
 #python specific
 *.pyc
 __pycache__
