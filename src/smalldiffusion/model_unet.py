@@ -78,7 +78,7 @@ class AttnBlock(nn.Module):
         h_ = rearrange(h_, 'b c h w -> b (h w) c')
         h_ = self.attn(h_)
         h_ = rearrange(h_, 'b (h w) c -> b c h w', h=H, w=W)
-        return x
+        return x + h_
 
 class Unet(ModelMixin, nn.Module):
     def __init__(self, in_dim, in_ch, out_ch,
