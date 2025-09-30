@@ -103,7 +103,7 @@ class Unet(ModelMixin, nn.Module):
         self.temb_ch = self.ch * embed_ch_mult
 
         # Embeddings
-        self.sig_embed = sig_embed or SigmaEmbedderSinCos(self.temb_ch)
+        self.sig_embed = sig_embed or SigmaEmbedderSinCos(self.temb_ch, rngs=rngs)
         make_block = lambda in_ch, out_ch: ResnetBlock(
             in_ch=in_ch, out_ch=out_ch, temb_channels=self.temb_ch, dropout=dropout, rngs=rngs
         )
