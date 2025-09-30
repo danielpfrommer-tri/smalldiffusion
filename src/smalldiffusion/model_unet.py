@@ -91,6 +91,7 @@ class Unet(ModelMixin, nn.Module):
                  resamp_with_conv = True,
                  sig_embed        = None,
                  cond_embed       = None,
+                 *,
                  rngs: Rngs,
                  ):
         super().__init__()
