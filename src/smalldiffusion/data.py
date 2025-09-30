@@ -2,19 +2,14 @@ import torch
 import typing as tp
 import csv
 import numpy as np
+import jax
 
 from torch.utils.data import Dataset, Sampler
 from torchvision import transforms as tf
 import torchvision.transforms.functional as tf_F
 
 from typing import Iterator, Sized, Optional
-
-try:
-    import jax.random
-    from flax.nnx import RngStream
-except ImportError:
-    type RngStream = tp.Any
-    jax = None
+from .model import RngStream
 
 ## Dataset utility functions
 
@@ -35,7 +30,7 @@ class RandomHorizontalFlip(torch.nn.Module):
         self.p = p
 
     def forward(self, img):
-        if self.rng.bernoulli(self.p):
+        if jax.random.bernoulli(self.rng(), self.p):
             return tf_F.hflip(img)
         return img
 

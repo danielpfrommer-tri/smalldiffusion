@@ -1,6 +1,6 @@
 import torch
 import itertools
-import subprocess
+import click
 import tempfile
 import wandb
 
@@ -14,15 +14,19 @@ from torchvision.utils import make_grid, save_image
 from torch_ema import ExponentialMovingAverage as EMA
 from tqdm import tqdm
 
-from flax.nnx import Rngs
-
 from smalldiffusion import (
     Unet, Scaled, ScheduleLogLinear, ScheduleSigmoid, samples, training_loop,
     MappedDataset, img_train_transform, img_normalize
 )
+from smalldiffusion.model import Rngs
 from smalldiffusion.data import JaxRandomSampler, img_test_transform
 
-def main(train_batch_size=256, epochs=1000, sample_batch_size=64, checkpoint=False):
+@click.option("--train_batch_size", default=256, type=int, help="Training batch size")
+@click.option("--epochs", default=1000, type=int, help="Number of epochs to train for")
+@click.option("--sample_batch_size", default=64, type=int, help="Batch size for sampling")
+@click.option("--checkpoint/--no-checkpoint", default=False, help="Whether to save checkpoints and evaluate FID during training")
+@click.command
+def main(train_batch_size, epochs, sample_batch_size, checkpoint):
     wandb.init()
     test_dataset = MappedDataset(
         CIFAR10('datasets', train=True, download=True,
@@ -91,4 +95,4 @@ def eval_fid(dataset_path, accelerator, model, eval_schedule, nfe, n, batchsize=
         return calculate_fid_given_paths((str(out_dir), str(dataset_path)), batchsize, accelerator.device, dims=2048)
 
 if __name__=='__main__':
-    main(checkpoint=True)
+    main()

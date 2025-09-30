@@ -3,64 +3,175 @@ import typing as tp
 import numpy as np
 import torch
 import torch.nn.functional as F
+
+import jax.random
+import jax.numpy
+
 from torch import nn
 from einops import rearrange, repeat
 from itertools import pairwise
 
-# For flax-compatible initialization
-try:
-    import jax
-    from flax.nnx import Rngs
-    from flax.nnx import initializers
-except ImportError:
-    type Rngs = tp.Any
-    jax, initializers = None, None
+type RngSeed = int | tp.Any
+
+class RngStream:
+    def __init__(self, key: RngSeed, *, tag: str):
+        self.key = jax.random.key(key) if isinstance(key, int) else key
+        self.count = jax.numpy.array(0, dtype=jax.numpy.uint32)
+        self.tag = tag
+
+    def __call__(self) -> jax.Array:
+        key = jax.random.fold_in(self.key, self.count)
+        self.count = self.count + 1
+        return key
+
+    def last(self) -> jax.Array:
+        return jax.random.fold_in(self.key, self.count - 1)
+
+    def fork(self, *, split: int | tuple[int, ...] | None = None):
+        key = self()
+        if split is not None:
+            key = jax.random.split(key, split)
+        return type(self)(key, tag=self.tag)
+
+class Rngs:
+    def __init__(
+        self,
+        default: (
+            RngSeed | RngStream | tp.Mapping[str, RngSeed | RngStream] | None
+        ) = None,
+        **rngs: RngSeed | RngStream,
+    ):
+        if default is not None:
+            if isinstance(default, tp.Mapping):
+                rngs = {**default, **rngs}
+            else:
+                rngs["default"] = default
+
+        self.streams = {}
+        for tag, key in rngs.items():
+            if isinstance(key, RngStream):
+                key = key.key.value[...]
+            self.streams[tag] = RngStream(
+                key=key,
+                tag=tag,
+            )
+
+    def _get_stream(self, name: str, error_type: type[Exception]) -> RngStream:
+        if name not in self.streams:
+            if "default" not in self.streams:
+                raise error_type(f"No RngStream named '{name}' found in Rngs.")
+            stream = self.streams["default"]
+        else:
+            stream = self.streams[name]
+        return stream
+
+    def __getitem__(self, name: str):
+        return self._get_stream(name, KeyError)
+
+    def __getattr__(self, name: str):
+        if name == "streams":
+            super().__getattribute__(name)
+        return self._get_stream(name, AttributeError)
+
+    def __call__(self):
+        return self.default()
+
+    def __contains__(self, name: tp.Any) -> bool:
+        return name in vars(self)
+
+    def items(self):
+        for name, stream in vars(self).items():
+            if isinstance(stream, RngStream):
+                yield name, stream
 
 ## Basic functions used by all models
 
-@torch.no_grad()
-def _linear_init(layer: nn.Linear, rngs: Rngs | None) -> nn.Linear:
-    if rngs is not None:
-        assert initializers is not None and jax is not None
-        scale = 1/ math.sqrt(layer.in_features)
-        # kernel = initializers.variance_scaling(1.0, "fan_in", "uniform")(rngs.params(), layer.weight.shape[::-1]).T
-        kernel = jax.random.uniform(rngs.params(), layer.weight.shape[::-1], minval=-scale, maxval=scale).T
-        layer.weight.data.copy_(torch.from_numpy(np.array(kernel)))
+class Linear(nn.Linear):
+    def __init__(self, in_features: int, out_features: int,
+                 bias: bool = True, device=None, dtype=None,
+                 *, rngs: Rngs):
+        self.kernel_init_key = rngs.params()
+        if bias:
+            self.bias_init_key = rngs.params()
+        super().__init__(in_features, out_features, bias=bias, device=device, dtype=dtype)
+    
+    def reset_parameters(self):
+        scale = 1/ math.sqrt(self.in_features)
+        kernel = jax.random.uniform(self.kernel_init_key, self.weight.shape[::-1], minval=-scale, maxval=scale).T
+        self.weight.data.copy_(torch.from_numpy(np.array(kernel)))
 
-        if layer.bias is not None:
-            bias = jax.random.uniform(rngs.params(), layer.bias.shape, minval=-scale, maxval=scale)
-            layer.bias.data.copy_(torch.from_numpy(np.array(bias)))
-    return layer
-
-@torch.no_grad()
-def _conv_init(layer: nn.Conv2d, rngs: Rngs | None) -> nn.Conv2d:
-    if rngs is not None:
-        assert initializers is not None and jax is not None
-        scale = 1 / math.sqrt(layer.in_channels * layer.kernel_size[0] * layer.kernel_size[1])
-
-        jax_shape = tuple(layer.weight.shape[i] for i in (2, 3, 1, 0))
-        # kernel = initializers.variance_scaling(1.0, "fan_in", "uniform")(rngs.params(), jax_shape)
-        kernel = jax.random.uniform(rngs.params(), jax_shape, minval=-scale, maxval=scale)
+        if self.bias is not None:
+            bias = jax.random.uniform(self.bias_init_key, self.bias.shape, minval=-scale, maxval=scale)
+            self.bias.data.copy_(torch.from_numpy(np.array(bias)))
+    
+class Conv2d(nn.Conv2d):
+    def __init__(self, in_channels: int, out_channels: int,
+                 kernel_size: int | tuple[int, int],
+                 stride: int | tuple[int, int] = 1,
+                 padding: int | tuple[int, int] | str = 0,
+                 dilation: int | tuple[int, int] = 1,
+                 groups: int = 1,
+                 bias: bool = True,
+                 padding_mode: str = 'zeros',
+                 device=None,
+                 dtype=None,
+                 *, rngs: Rngs):
+        self.kernel_init_key = rngs.params()
+        if bias:
+            self.bias_init_key = rngs.params()
+        super().__init__(in_channels, out_channels, kernel_size, stride,
+                         padding, dilation, groups, bias, padding_mode,
+                         device=device, dtype=dtype)
+    
+    def reset_parameters(self):
+        scale = 1 / math.sqrt(self.in_channels * self.kernel_size[0] * self.kernel_size[1])
+        jax_shape = tuple(self.weight.shape[i] for i in (2, 3, 1, 0))
+        # kernel = initializers.variance_scaling(1.0, "fan_in", "uniform")(self.kernel_init_key, jax_shape)
+        kernel = jax.random.uniform(self.kernel_init_key, jax_shape, minval=-scale, maxval=scale)
         kernel = kernel.transpose(3, 2, 0, 1) # to PyTorch shape
+        self.weight.data.copy_(torch.from_numpy(np.array(kernel)))
 
-        layer.weight.data.copy_(torch.from_numpy(np.array(kernel)))
-        if layer.bias is not None:
-            bias = jax.random.uniform(rngs.params(), layer.bias.shape, minval=-scale, maxval=scale)
-            layer.bias.data.copy_(torch.from_numpy(np.array(bias)))
-    return layer
+        if self.bias is not None:
+            bias = jax.random.uniform(self.bias_init_key, self.bias.shape, minval=-scale, maxval=scale)
+            self.bias.data.copy_(torch.from_numpy(np.array(bias)))
+    
+class Dropout(nn.Dropout):
+    def __init__(self, p: float = 0.5, inplace: bool = False, *, rngs: Rngs):
+        self.rng_stream = rngs.dropout.fork()
+        super().__init__(p, inplace)
+    
+    # use the jax dropout rng
+    def forward(self, input: torch.Tensor) -> torch.Tensor:
+        return super().forward(input)
+        # TODO: Make not super slow
+        if not self.training:
+            return input
+        else:
+            mask_shape = input.shape
+            if len(mask_shape) == 4:
+                # turn NCHW to NHWC for jax compatbility
+                mask_shape = tuple(mask_shape[i] for i in (0, 2, 3, 1))
+                mask = jax.random.bernoulli(self.rng_stream(), self.p, mask_shape)
+                mask = jax.numpy.transpose(mask, (0, 3, 1, 2)) # back to NCHW
+            else:
+                mask = jax.random.bernoulli(self.rng_stream(), self.p, mask_shape)
+            mask = torch.from_numpy(np.array(mask))
+            mask = mask.to(input.device)
+            output = torch.where(mask, 0, input)
+            scale = 1/(1 - self.p)
+            return output * scale
 
-def _dropout_init(layer: nn.Dropout, rngs: Rngs | None) -> nn.Dropout:
-    # burn one key to mimic the flax behavior
-    if rngs is not None:
-        rngs.dropout()
-    return layer
 
-def _gn_init(layer: nn.GroupNorm, rngs: Rngs | None) -> nn.GroupNorm:
-    # burn two keys to mimic the flax behavior
-    if rngs is not None:
-        rngs.params()
-        rngs.params()
-    return layer
+class GroupNorm(nn.GroupNorm):
+    def __init__(self, num_channels, *, num_groups=32, eps=1e-06,
+                affine=True, device=None, dtype=None, rngs: Rngs):
+        if affine:
+            self.scale_init_key = rngs.params()
+            self.bias_init_key = rngs.params()
+        super().__init__(
+            num_groups, num_channels,
+            eps, affine, device, dtype
+        )
 
 class ModelMixin:
     def rand_input(self, batchsize) -> torch.Tensor:
@@ -96,14 +207,14 @@ def get_sigma_embeds(batches, sigma, scaling_factor=0.5, log_scale=True):
 
 # A simple embedding that works just as well as usual sinusoidal embedding
 class SigmaEmbedderSinCos(nn.Module):
-    def __init__(self, hidden_size, scaling_factor=0.5, log_scale=True, rngs: Rngs | None = None):
+    def __init__(self, hidden_size, scaling_factor=0.5, log_scale=True, *, rngs: Rngs):
         super().__init__()
         self.scaling_factor = scaling_factor
         self.log_scale = log_scale
         self.mlp = nn.Sequential(
-            _linear_init(nn.Linear(2, hidden_size, bias=True), rngs),
+            Linear(2, hidden_size, bias=True, rngs=rngs),
             nn.SiLU(),
-            _linear_init(nn.Linear(hidden_size, hidden_size, bias=True), rngs),
+            Linear(hidden_size, hidden_size, bias=True, rngs=rngs)
         )
 
     def forward(self, batches, sigma):
@@ -155,13 +266,13 @@ class CondSequential(nn.Sequential):
         return x
 
 class Attention(nn.Module):
-    def __init__(self, head_dim, num_heads=8, qkv_bias=False, rngs: Rngs | None = None):
+    def __init__(self, head_dim, num_heads=8, qkv_bias=False, *, rngs: Rngs):
         super().__init__()
         self.num_heads = num_heads
         self.head_dim = head_dim
         dim = head_dim * num_heads
-        self.qkv = _linear_init(nn.Linear(dim, dim * 3, bias=qkv_bias), rngs)
-        self.proj = _linear_init(nn.Linear(dim, dim), rngs)
+        self.qkv = Linear(dim, dim * 3, bias=qkv_bias, rngs=rngs)
+        self.proj = Linear(dim, dim, rngs=rngs)
 
     def forward(self, x):
         # (B, N, D) -> (B, N, D)
