@@ -1,4 +1,7 @@
 import torch
+import itertools
+import click
+import tempfile
 import wandb
 
 from pathlib import Path
@@ -8,16 +11,20 @@ from torch.utils.data import DataLoader
 from torchvision.datasets import CIFAR10
 from torch_ema import ExponentialMovingAverage as EMA
 
-from flax.nnx import Rngs
-
 from smalldiffusion import (
     Unet, Scaled, ScheduleLogLinear, ScheduleSigmoid, samples, training_loop,
     MappedDataset, img_train_transform, img_normalize
 )
+from smalldiffusion.model import Rngs
 from smalldiffusion.data import JaxRandomSampler, img_test_transform
 from cifar_utils import dump_dataset, eval_fid
 
-def main(train_batch_size=256, epochs=1000, sample_batch_size=64, checkpoint=False):
+@click.option("--train_batch_size", default=256, type=int, help="Training batch size")
+@click.option("--epochs", default=1000, type=int, help="Number of epochs to train for")
+@click.option("--sample_batch_size", default=64, type=int, help="Batch size for sampling")
+@click.option("--checkpoint/--no-checkpoint", default=False, help="Whether to save checkpoints and evaluate FID during training")
+@click.command
+def main(train_batch_size, epochs, sample_batch_size, checkpoint):
     wandb.init()
     test_dataset = MappedDataset(
         CIFAR10('datasets', train=True, download=True,
@@ -61,4 +68,4 @@ def main(train_batch_size=256, epochs=1000, sample_batch_size=64, checkpoint=Fal
                 wandb.log({'fid': fid}, step=i)
 
 if __name__=='__main__':
-    main(checkpoint=True)
+    main()
