@@ -162,11 +162,9 @@ class Unet(ModelMixin, nn.Module):
             _conv_init(torch.nn.Conv2d(block_in, out_ch, kernel_size=3, stride=1, padding=1), rngs),
         )
 
-    def forward(self, x, sigma, cond=None):
+    def fwd_emb(self, x, emb, cond):
         assert x.shape[2] == x.shape[3] == self.in_dim
 
-        # Embeddings
-        emb = self.sig_embed(x.shape[0], sigma.squeeze())
         if self.cond_embed is not None:
             assert cond is not None and x.shape[0] == cond.shape[0], \
                 'Conditioning must have same batches as x!'
@@ -193,3 +191,7 @@ class Unet(ModelMixin, nn.Module):
 
         # out
         return self.out_layer(h)
+
+    def forward(self, x, sigma, cond=None):
+        emb = self.sig_embed(x.shape[0], sigma.squeeze())
+        return self.fwd_emb(x, emb, cond)
